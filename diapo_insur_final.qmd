@@ -1,0 +1,938 @@
+---
+title: "À l'assault des clients : qui s'assurera chez nous ?"
+author: "Raphael MERCIER and Alexis SAVATON"
+format: 
+  revealjs:
+    slide-number: true
+    theme: night
+
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE, echo = FALSE)
+```
+
+```{r echo=FALSE, include=FALSE, cache= FALSE}
+library(tidymodels)
+library(tidyverse)
+library(workflows)
+library(tune)
+library(doParallel)
+library(kableExtra)
+library(pROC)
+library(discrim)
+library(dplyr)
+library(caret)
+library(xgboost)
+library(knitr)
+library(modelsummary)
+library(vip)
+library(ggdark)
+```
+
+```{r echo=FALSE, include=FALSE}
+set.seed(69)
+```
+
+```{r}
+df <- read.csv("resampled_data_new.csv", header = TRUE, sep =",",
+                     stringsAsFactors = TRUE)
+```
+
+
+```{r}
+df_1k <- read.csv("resampled_data_new_10k.csv", header = TRUE, sep =",",
+                     stringsAsFactors = TRUE)
+```
+
+
+```{r valeures aberantes}
+clean_outliers <- function(data, column_name) {
+  Q1 <- quantile(data[[column_name]], 0.25)
+  Q3 <- quantile(data[[column_name]], 0.75)
+  IQR <- Q3 - Q1
+  
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  
+  cleaned_data <- filter(data, data[[column_name]] <= upper_bound & data[[column_name]] >= lower_bound)
+  
+  return(cleaned_data)
+}
+
+```
+
+```{r}
+df1 <- clean_outliers(df,'Annual_Premium')
+df1_1k <- clean_outliers(df_1k,'Annual_Premium')
+```
+
+```{r}
+df1$Previously_Insured <- df1$Previously_Insured |> as.factor()
+df1$Driving_License <- df1$Driving_License |> as.factor()
+df1$Response <- df1$Response |> as.factor()
+df1$Region_Code <- df1$Region_Code |> as.factor()
+df1$Policy_Sales_Channel <- df1$Policy_Sales_Channel |> as.factor()
+
+df1_1k$Previously_Insured <- df1_1k$Previously_Insured |> as.factor()
+df1_1k$Driving_License <- df1_1k$Driving_License |> as.factor()
+df1_1k$Response <- df1_1k$Response |> as.factor()
+df1_1k$Region_Code <- df1_1k$Region_Code |> as.factor()
+df1_1k$Policy_Sales_Channel <- df1_1k$Policy_Sales_Channel |> as.factor()
+```
+
+```{r table metrics}
+create_metrics_table <- function(tab_lda) {
+  metrics_df <- data.frame(
+    Métrique = c("Accuracy", "Erreur globale de classement", "Vrai négatif", "Vrai positif", "Précision"),
+    Valeur = c(
+      round((tab_lda$table[1,1] + tab_lda$table[2,2]) / sum(tab_lda$table)*100, 2),
+      round((tab_lda$table[1,2] + tab_lda$table[2,1]) / sum(tab_lda$table)*100, 2),
+      round((tab_lda$table[1,1] / sum(tab_lda$table[1,])) * 100, 2),
+      round((tab_lda$table[2,2] / sum(tab_lda$table[2,])) * 100, 2),
+      round((tab_lda$table[1,1] / (tab_lda$table[1,1] + tab_lda$table[2,1])) * 100, 2)
+    )
+  )
+
+  colnames(metrics_df)[2] <- "Valeur en %"
+  
+  metrics_table <- metrics_df %>%
+    kable("html") %>%
+    kable_styling(bootstrap_options = "striped", full_width = FALSE)
+  
+  return(metrics_table)
+}
+```
+
+
+# Problématique / Objectif 
+
+## {.scrollable}
+Nous sommes une compagnie d'assurance et on possède une base de données avec des clients potentiels.  
+
+<br>
+
+$\Rightarrow$ **On veut déterminer notre meilleur modèle de prédiction pour ne pas rater nos clients potentiels**
+
+# Partie 1 : Notre Base de Données 
+
+## Les ajustements
+
+<br>
+
+La base de données fournie contient 381 000 individus, par soucis d'efficacité on a décidé de la réduire à 75 000 individus.
+
+<hr>
+
+On a également supprimé les données aberrantes dans la variable Annual_premium.
+
+## Les ajustements
+
+<br>
+
+On fait également face à un autre soucis : les classes sont fortement déséquilibrées.
+Sur 75 000 individus, seulement 9000 prennent la modalité 1 pour Response, ce qui peut biaiser les modèles. 
+
+<hr>
+
+On a donc décidé de rééquilibrer la base de donnée sur 100 000 individus, puis on a resemplé pour atteindre 75 000 individus et une proportion des classes équilibrée.
+
+## Type de variable {.smaller}
+
+
+
+La variable que l'on cherche à prédire est ***Response***, elle vaut 0 si le client n'est pas intéressé ou 1 s'il est intéressé.
+
+<br>
+
+Pour cela on dispose de 10 autres variables :
+
+:::: {.columns}
+::: {.column width="50%"}
+
+- ***Gender*** : *Factor*
+
+- ***Age*** : *Integer*
+
+- ***Driving_License*** : *Factor*
+
+- ***Region_Code*** : *Factor*
+
+- ***Previously_Insured*** : *Factor*
+
+:::
+
+::: {.column width="50%"}
+
+
+- ***Vehicule_Age*** : *Factor*
+
+- ***Vehicule_Damage*** : *Factor*
+
+- ***Annual_Premium*** : *Integer*
+
+- ***Policy_Sales_Channel*** : *Integer*
+
+- ***Vintage*** : *Integer*
+
+
+:::
+::::
+
+
+# Statistiques descriptives
+
+## Nos variables quantitatives {.smaller}
+
+```{r stats}
+variables <- c("Age", "Annual_Premium", "Vintage")
+
+kable(summary(df1[, variables]), format = "html") |> 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+
+# Partie 2 : Construction des modèles
+
+## La préparation {.smaller}
+
+1. Découpage train/test 2/3 
+
+<br>
+
+split<-initial_split(df1,prop=2/3,strat="Response")
+df_train<-training(split)
+df_test<-testing(split)
+
+split_1k<-initial_split(df1_1k,prop=2/3,strat="Response")
+df_1k_train<-training(split_1k)
+df_1k_test<-testing(split_1k)
+```{r split }
+split<-initial_split(df1,prop=2/3,strat="Response")
+df_train<-training(split)
+df_test<-testing(split)
+
+split_1k<-initial_split(df1_1k,prop=2/3,strat="Response")
+df_1k_train<-training(split_1k)
+df_1k_test<-testing(split_1k)
+```
+
+```{r fold}
+df_fold <- vfold_cv(df_train)
+```
+
+<br>
+
+2. Les Recettes
+```{r}
+df_rec_1<- df_train %>%
+  recipe(Response ~ Gender + Age + Driving_License + Region_Code + Previously_Insured+ Vehicle_Age + Vehicle_Damage + Annual_Premium + Vintage)
+```
+
+```{r}
+df_rec_num <- recipe(Response~Age + Annual_Premium + Vintage, data = df_train) |> 
+  step_normalize(all_numeric())
+```
+
+```{r}
+df_rec <- recipe(Response~., data = df_train) |> 
+  step_normalize(all_numeric())
+```
+
+```{r}
+df_rec_boosting <- recipe(Response ~ ., data = df_1k_train)|>
+  step_dummy(all_nominal_predictors()) 
+```
+
+
+**df_rec_1** : recette sans la variable Policy_Sales_Channel  
+**df_rec_num** : recette avec que les variables numériques  
+**df_rec** : recette avec toutes les variables  
+**df_rec_boosting** : recette pour le boosting avec moins d'individus  
+
+# Nos modèles
+
+# LDA {.smaller}
+
+## MATRICE DE CONFUSION {.smaller} 
+
+<br>
+
+```{r model lda}
+lda_mod<- discrim_linear() |> 
+  set_mode("classification") |> 
+  set_engine("MASS") |> 
+  set_args(cost = tune())
+```
+
+```{r workflow lda}
+lda_wf<- workflow() %>%
+  add_recipe(df_rec_1) %>%
+  add_model(lda_mod)
+```
+
+```{r optimisation lda}
+n_cores <- parallel::detectCores(logical = TRUE)
+registerDoParallel(cores = n_cores - 2)
+
+lda_grid <- grid_regular(cost(),levels =10)
+
+system.time(
+  lda_tune_results <- lda_wf |> 
+    tune_grid(resamples = df_fold,
+              grid = lda_grid,
+              metrics = metric_set(accuracy, roc_auc)
+              )
+)
+stopImplicitCluster()
+```
+
+```{r paramtre optimal lda}
+param_final_lda <- lda_tune_results %>%
+  select_best(metric = "accuracy")
+
+lda_wf <- lda_wf %>%
+  finalize_workflow(param_final_lda)
+
+lda_fit <- lda_wf %>%
+  last_fit(split)
+
+test_performance_lda <- lda_fit %>% collect_metrics()
+
+test_predictions_lda <- lda_fit %>% collect_predictions()
+```
+
+
+```{r mat conf lda}
+tab_lda<-test_predictions_lda %>%
+  conf_mat(estimate = .pred_class,truth=Response)
+
+tab0_lda <- tab_lda$table %>% as.array() %>% t() %>% addmargins()
+
+tab1_lda<- tab0_lda  %>% matrix(nrow=nrow(tab0_lda)) %>%
+  as_tibble() %>%
+  add_column(Réalité=c("N","Y","Total"),.before=1) %>%
+  rename(N = V1, Y = V2,Total=V3)
+
+tab1_lda %>% kable() %>%  add_header_above(c(" ","Prédiction" = 2," ")) %>%
+  column_spec(c(4), bold = T ,width="2cm")   %>%
+  column_spec(1,bold=T) %>%
+  row_spec(c(3), bold = T )   %>%
+  row_spec(c(0), bold = T) %>%
+  kable_styling(position="center",full_width = FALSE,
+                bootstrap_options = "bordered",
+                latex_options = "hold_position")
+```
+
+
+## MESURE DE PERFORMANCE {.smaller}
+
+<br>
+
+```{r metrics lda}
+metrics_table_lda <- create_metrics_table(tab_lda)
+metrics_table_lda
+```
+
+## COURBE ROC {.smaller}
+
+```{r roc lda}
+roc_curve_lda <-roc(test_predictions_lda$Response, test_predictions_lda$.pred_1)
+ggroc(roc_curve_lda, col = "white") + geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "red")+
+  dark_theme_minimal()
+  
+
+roc(test_predictions_lda$Response, test_predictions_lda$.pred_1) |> auc()
+```
+
+
+# QDA
+
+## MATRICE DE CONFUSION {.smaller} 
+
+<br>
+```{r modele qda}
+qda_mod<- discrim_quad() |> 
+  set_mode("classification") |> 
+  set_engine("MASS")
+```
+
+```{r workflow qda}
+qda_wf<- workflow() |> 
+  add_recipe(df_rec_1) |> 
+  add_model(qda_mod)
+```
+
+```{r}
+qda_fit <-last_fit(qda_wf,split=split)
+
+tab_result_qda<-qda_fit %>% collect_predictions()  
+
+```
+
+```{r mat conf qda}
+tab_qda<-tab_result_qda %>%
+  conf_mat(estimate = .pred_class,truth=Response)
+tab0_qda <- tab_qda$table %>% as.array() %>% t() %>% addmargins()
+tab1_qda<- tab0_qda  %>% matrix(nrow=nrow(tab0_qda)) %>%
+  as_tibble() %>%
+  add_column(Réalité=c("N","Y","Total"),.before=1) %>%
+  rename(N = V1, Y = V2,Total=V3)
+tab1_qda %>% kable() %>%  add_header_above(c(" ","Prédiction" = 2," ")) %>%
+  column_spec(c(4), bold = T ,width="2cm")   %>%
+  column_spec(1,bold=T) %>%
+  row_spec(c(3), bold = T )   %>%
+  row_spec(c(0), bold = T) %>%
+  kable_styling(position="center",full_width = FALSE,
+                bootstrap_options = "bordered",
+                latex_options = "hold_position")
+```
+
+
+## MESURE DE PERFORMANCE {.smaller}
+
+<br>
+```{r metric qda}
+metrics_table_qda <- create_metrics_table(tab_qda)
+metrics_table_qda
+```
+
+
+## COURBE ROC {.smaller}
+
+
+
+```{r roc qda}
+roc_curve_qda <- roc(tab_result_qda$Response,tab_result_qda$.pred_1) 
+ggroc(roc_curve_qda, col = "white") +  ggtitle("Courbe ROC") + geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "red")+
+  dark_theme_minimal()
+
+roc(tab_result_qda$Response,tab_result_qda$.pred_1) |>  auc()
+```
+
+
+# KNN 
+
+## OPTIMISATION DES PARAMETRES {.smaller}
+
+<br>
+```{r modele knn}
+knn_mod <- nearest_neighbor() |> 
+  set_mode("classification") |> 
+  set_engine("kknn") |> 
+  set_args(neighbors=tune())
+```
+
+```{r workflow knn}
+knn_wf <- workflow() |> add_model(knn_mod) |> 
+  add_recipe(df_rec_num) 
+```
+
+```{r optimisation knn}
+n_cores <- parallel::detectCores(logical = TRUE)
+registerDoParallel(cores = n_cores - 2)
+
+knn_grid <- grid_regular(neighbors(),levels=10)
+
+system.time(
+  knn_tune_res <- tune_grid(
+    knn_wf,
+    resamples = df_fold,
+    grid = knn_grid
+  )
+)
+
+stopImplicitCluster()
+
+autoplot(knn_tune_res)+
+  dark_theme_minimal()
+```
+
+```{r param knn}
+param_final_knn <- knn_tune_res %>%
+  select_best(metric = "accuracy")
+
+knn_wf <- knn_wf %>%
+  finalize_workflow(param_final_knn)
+
+knn_fit <- knn_wf %>%
+  last_fit(split)
+
+test_performance_knn <- knn_fit %>% collect_metrics()
+
+test_predictions_knn <- knn_fit %>% collect_predictions()
+
+```
+
+## MATRICE DE CONFUSION {.smaller} 
+
+<br>
+```{r mat conf knn}
+tab_knn<-test_predictions_knn %>%
+  conf_mat(estimate = .pred_class,truth=Response)
+
+tab0_knn <- tab_knn$table %>% as.array() %>% t() %>% addmargins()
+
+tab1_knn<- tab0_knn  %>% matrix(nrow=nrow(tab0_knn)) %>%
+  as_tibble() %>%
+  add_column(Réalité=c("N","Y","Total"),.before=1) %>%
+  rename(N = V1, Y = V2,Total=V3)
+
+tab1_knn %>% kable() %>%  add_header_above(c(" ","Prédiction" = 2," ")) %>%
+  column_spec(c(4), bold = T ,width="2cm")   %>%
+  column_spec(1,bold=T) %>%
+  row_spec(c(3), bold = T)   %>%
+  row_spec(c(0), bold = T) %>%
+  kable_styling(position="center",full_width = FALSE,
+                bootstrap_options = "bordered",
+                latex_options = "hold_position")
+```
+
+## MESURE DE PERFORMANCE {.smaller}
+
+<br>
+```{r metric knn}
+metrics_table_knn <- create_metrics_table(tab_knn)
+metrics_table_knn
+```
+
+## COURBE ROC {.smaller}
+
+```{r roc knn}
+roc_curve_knn <- roc(test_predictions_knn$Response, test_predictions_knn$.pred_1)
+ggroc(roc_curve_knn, col = "white") + ggtitle("Courbe ROC") + geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "red")+
+  dark_theme_minimal()
+
+roc(test_predictions_knn$Response, test_predictions_knn$.pred_1) |> auc()
+```
+
+# LOGISTIC REGRESSION 
+
+## MATRICE DE CONFUSION {.smaller} 
+
+<br>
+```{r logit_mod_wf}
+logit_mod <- logistic_reg() |>  
+  set_mode("classification") |> 
+  set_engine("glm")
+
+logit_wf <- workflow() |> 
+  add_model(logit_mod) |> 
+  add_recipe(df_rec_1)
+
+logit_wf_final <-last_fit(logit_wf,split=split)
+
+tab_result_logit<-logit_wf_final %>% collect_predictions()  
+```
+
+```{r mat conf logit}
+tab_logit<-tab_result_logit %>%
+  conf_mat(estimate = .pred_class,truth=Response)
+tab0_logit <- tab_logit$table %>% as.array() %>% t() %>% addmargins()
+tab1_logit<- tab0_logit  %>% matrix(nrow=nrow(tab0_logit)) %>%
+  as_tibble() %>%
+  add_column(Réalité=c("N","Y","Total"),.before=1) %>%
+  rename(N = V1, Y = V2,Total=V3)
+tab1_logit %>% kable() %>%  add_header_above(c(" ","Prédiction" = 2," ")) %>%
+  column_spec(c(4), bold = T ,width="2cm")   %>%
+  column_spec(1,bold=T) %>%
+  row_spec(c(3), bold = T )   %>%
+  row_spec(c(0), bold = T) %>%
+  kable_styling(position="center",full_width = FALSE,
+                bootstrap_options = "bordered",
+                latex_options = "hold_position")
+```
+
+## MESURE DE PERFORMANCE {.smaller}
+
+<br>
+```{r metric logit}
+metrics_table_logit <- create_metrics_table(tab_logit)
+metrics_table_logit
+```
+
+## COURBE ROC {.smaller}
+
+
+```{r roc logit}
+roc_curve_logit <- roc(tab_result_logit$Response,tab_result_logit$.pred_1) 
+ggroc(roc_curve_logit, col = "white") +  ggtitle("Courbe ROC") + geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "red")+
+  dark_theme_minimal()
+
+
+roc(tab_result_logit$Response,tab_result_logit$.pred_1) |>  auc()
+```
+
+# DECISION TREE
+
+## OPTIMISATION DES PARAMETRES {.smaller}
+ 
+ <br>
+```{r mod arbre}
+arbre_mod <- decision_tree() |> 
+  set_engine("rpart") |> 
+  set_mode("classification") |> 
+  set_args(cost_complexity = tune(),
+           tree_depth = tune())
+```
+
+```{r workflow abre}
+arbre_wf <- workflow() |> add_model(arbre_mod) |> 
+  add_recipe(df_rec) 
+```
+
+```{r optimisation abre}
+n_cores <- parallel::detectCores(logical = TRUE)
+registerDoParallel(cores = n_cores - 2)
+
+arbre_grid <- grid_regular(cost_complexity(range = c(-15,-0.1)), tree_depth(), 
+                                     levels = 10)
+
+system.time(
+  arbre_tune_res <- tune_grid(
+    arbre_wf,
+    resamples = df_fold,
+    grid = arbre_grid,
+    metrics = metric_set(accuracy)
+  )
+)
+
+stopImplicitCluster()
+
+autoplot(arbre_tune_res)+
+  dark_theme_minimal()
+```
+
+```{r param final arbre}
+param_final_arbre <- arbre_tune_res %>%
+  select_best(metric = "accuracy")
+
+arbre_wf <- arbre_wf %>%
+  finalize_workflow(param_final_arbre)
+
+arbre_fit <- arbre_wf %>%
+  last_fit(split)
+
+test_performance_arbre <- arbre_fit %>% collect_metrics()
+
+test_predictions_arbre <- arbre_fit %>% collect_predictions()
+
+cp_tree <- param_final_arbre$cost_complexity
+```
+
+On obtient un paramètre $γ$ optimal de : **`r format(cp_tree, scientific = FALSE)`** et une profondeur de **`r param_final_arbre$tree_depth`**.
+
+## VISUALITSATION DE L'ARBRE OBTENU {.smaller}
+
+
+```{r tree_fit}
+arbre_fit |>  
+  extract_fit_engine() |>  
+  rpart.plot::prp(type = 0, extra = 1, split.box.col = "red",
+                  roundint = FALSE)
+```
+
+## VARIABLES IMPORTANTES
+```{r}
+arbre_final_model <- last_fit(arbre_wf, split)
+```
+
+```{r}
+extract_fit_parsnip(arbre_final_model)$fit |>
+  vip(num_features = 20) +
+  ggtitle("Importance des variables") +
+  dark_mode(theme_minimal())
+```
+
+## MATRICE DE CONFUSION {.smaller}
+
+<br>
+```{r mat conf abre}
+tab_arbre<-test_predictions_arbre %>%
+  conf_mat(estimate = .pred_class,truth=Response)
+
+tab0_arbre <- tab_arbre$table %>% as.array() %>% t() %>% addmargins()
+
+tab1_arbre<- tab0_arbre  %>% matrix(nrow=nrow(tab0_arbre)) %>%
+  as_tibble() %>%
+  add_column(Réalité=c("N","Y","Total"),.before=1) %>%
+  rename(N = V1, Y = V2,Total=V3)
+
+tab1_arbre %>% kable() %>%  add_header_above(c(" ","Prédiction" = 2," ")) %>%
+  column_spec(c(4), bold = T ,width="2cm")   %>%
+  column_spec(1,bold=T) %>%
+  row_spec(c(3), bold = T )   %>%
+  row_spec(c(0), bold = T) %>%
+  kable_styling(position="center",full_width = FALSE,
+                bootstrap_options = "bordered",
+                latex_options = "hold_position")
+```
+
+## MESURE DE PERFORMANCE {.smaller}
+
+<br>
+```{r metric arbre}
+metrics_table_arbre <- create_metrics_table(tab_arbre)
+metrics_table_arbre
+```
+
+## COURBE ROC {.smaller}
+
+
+```{r roc arbre}
+roc_curve_arbre <- roc(test_predictions_arbre$Response, test_predictions_arbre$.pred_1) 
+ggroc(roc_curve_arbre, col = "white") + ggtitle("Courbe ROC") + geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "red")+
+  dark_theme_minimal()
+
+roc(test_predictions_arbre$Response, test_predictions_arbre$.pred_1) |> auc()
+```
+
+# RANDOM FOREST
+
+## OPTIMISATION DES PARAMETRES {.smaller}
+
+<br>
+```{r model rf}
+#rf_mod <- rand_forest() |> 
+#  set_args(mtry = tune(), trees = tune()) |> 
+#  set_engine("ranger", importance = "impurity") |> 
+#  set_mode("classification")
+```
+
+```{r workflow rf}
+#rf_wf <- workflow() |> 
+#  add_recipe(df_rec) |> 
+#  add_model(rf_mod)
+```
+
+```{r optimisation rf}
+#n_cores <- parallel::detectCores(logical = TRUE)
+#registerDoParallel(cores = n_cores - 1)
+
+#rf_params <- extract_parameter_set_dials(rf_wf) |>  
+#  update(mtry = mtry(c(1,10)), trees = trees(c(50,500)))
+
+#rf_grid <- grid_regular(rf_params, levels = c(mtry = 10, trees = 5))
+
+#system.time(
+#  rf_tune_results <- rf_wf |> 
+#    tune_grid(resamples = df_fold,
+#              grid = rf_grid,
+#              metrics = metric_set(accuracy)
+#              )
+#)
+#stopImplicitCluster()
+#
+#autoplot(rf_tune_results)+
+#  dark_theme_minimal()
+```
+```{r load rf}
+load("save_rf.RData")
+```
+
+```{r param rf}
+#param_final_rf <- rf_tune_results %>%
+#  select_best(metric = "accuracy")
+
+#rf_wf <- rf_wf %>%
+#  finalize_workflow(param_final_rf)
+
+#rf_fit <- rf_wf %>%
+#  last_fit(split)
+
+test_performance_rf <- rf_fit |>  collect_metrics()
+
+test_predictions_rf <- rf_fit |>  collect_predictions()
+```
+
+Meilleurs hyperparamètres : **ntrees = 500 ** & **mtry = 3**.
+
+## MATRICE DE CONFUSION {.smaller} 
+
+<br>
+```{r mat conf rf}
+tab_rf<-test_predictions_rf %>%
+  conf_mat(estimate = .pred_class,truth=Response)
+
+tab0_rf <- tab_rf$table %>% as.array() %>% t() %>% addmargins()
+
+tab1_rf<- tab0_rf  %>% matrix(nrow=nrow(tab0_rf)) %>%
+  as_tibble() %>%
+  add_column(Réalité=c("N","Y","Total"),.before=1) %>%
+  rename(N = V1, Y = V2,Total=V3)
+
+tab1_rf %>% kable() %>%  add_header_above(c(" ","Prédiction" = 2," ")) %>%
+  column_spec(c(4), bold = T ,width="2cm")   %>%
+  column_spec(1,bold=T) %>%
+  row_spec(c(3), bold = T )   %>%
+  row_spec(c(0), bold = T) %>%
+  kable_styling(position="center",full_width = FALSE,
+                bootstrap_options = "bordered",
+                latex_options = "hold_position")
+```
+
+## MESURE DE PERFORMANCE {.smaller}
+
+<br>
+```{r metric rf}
+metrics_table_rf <- create_metrics_table(tab_rf)
+metrics_table_rf
+```
+
+## COURBE ROC {.smaller}
+
+
+```{r roc rf}
+roc_curve_rf <- roc(test_predictions_rf$Response, test_predictions_rf$.pred_1)
+ggroc(roc_curve_rf, col = "white") + ggtitle("Courbe ROC") + geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "red")+
+  dark_theme_minimal()
+
+roc(test_predictions_rf$Response, test_predictions_rf$.pred_1) |> auc()
+```
+
+# BOOSTING 
+
+## OPTIMISATION {.smaller}
+
+<br>
+```{r boost_mod_wf}
+boosting_mod <- boost_tree() |>  
+  set_engine("xgboost") |>  
+  set_mode("classification") |> 
+  set_args(trees = tune(), tree_depth = tune(), learn_rate = tune())
+
+boosting_wf <- workflow() |>  
+  add_model(boosting_mod) |> 
+  add_recipe(df_rec_boosting)
+```
+
+```{r optimisation boosting}
+n_cores <- parallel::detectCores(logical = TRUE)
+registerDoParallel(cores = n_cores - 1)
+
+boosting_params <- boosting_wf |> 
+  extract_parameter_set_dials() |> 
+  update(trees= trees(c(1,500)), 
+         tree_depth = tree_depth(c(1,10)), 
+         learn_rate = learn_rate(c(1,5))
+         )
+
+boosting_grid <- grid_regular(boosting_params, levels = 3)
+
+system.time(
+  boosting_tune_res <- tune_grid(boosting_wf,
+      resamples = df_fold, 
+      grid = boosting_grid,
+      metrics = metric_set(accuracy)
+    )
+)
+
+
+stopImplicitCluster()
+
+autoplot(boosting_tune_res)+
+  dark_theme_minimal()
+```
+
+<br>
+```{r param boosting}
+param_final_boosting <- boosting_tune_res %>%
+  select_best(metric = "accuracy")
+
+boosting_wf <- boosting_wf %>%
+  finalize_workflow(param_final_boosting)
+
+boosting_fit <- boosting_wf %>%
+  last_fit(split)
+
+test_performance_boosting <- boosting_fit %>% collect_metrics()
+
+test_predictions_boosting <- boosting_fit %>% collect_predictions()
+
+```
+
+Meilleurs hyperparamètres : **ntrees = `r param_final_boosting$trees` **, **depth = `r param_final_boosting$tree_depth`** & $\lambda =$ **`r param_final_boosting$learn_rate`**.
+
+## MATRICE DE CONFUSION {.smaller} 
+
+<br>
+```{r mat conf boosting}
+tab_boosting <- test_predictions_boosting |>
+  conf_mat(estimate = .pred_class, truth = Response)
+
+tab0_boosting <- tab_boosting$table %>% as.array() %>% t() %>% addmargins()
+
+tab1_boosting<- tab0_boosting  %>% matrix(nrow=nrow(tab0_boosting)) %>%
+  as_tibble() %>%
+  add_column(Réalité=c("N","Y","Total"),.before=1) %>%
+  rename(N = V1, Y = V2,Total=V3)
+
+tab1_boosting %>% kable() %>%  add_header_above(c(" ","Prédiction" = 2," ")) %>%
+  column_spec(c(4), bold = T,width="2cm")   %>%
+  column_spec(1,bold=T) %>%
+  row_spec(c(3), bold = T )   %>%
+  row_spec(c(0), bold = T) %>%
+  kable_styling(position="center",full_width = FALSE,
+                bootstrap_options = "bordered",
+                latex_options = "hold_position")
+```
+
+## MESUREDE PERFORMANCE {.smaller}
+
+<br>
+```{r metric boosting}
+metrics_table_boosting <- create_metrics_table(tab_boosting)
+metrics_table_boosting
+```
+
+## COURBE ROC {.smaller}
+
+```{r roc_boost}
+roc_curve_boosting <- roc(test_predictions_boosting$Response, test_predictions_boosting$.pred_1) 
+ggroc(roc_curve_boosting, col = "white") + ggtitle("Courbe ROC") + geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "red")+
+  dark_theme_minimal()
+
+roc(test_predictions_boosting$Response, test_predictions_boosting$.pred_1) |> auc()
+```
+
+# Partie 3 : C'est lequel le best ?
+
+## Comparaison Courbe ROC {.smaller}
+
+<br>
+
+```{r all_roc}
+ggroc(list(knn = roc_curve_knn, lda = roc_curve_lda,
+           qda = roc_curve_qda, logit = roc_curve_logit,
+           tree = roc_curve_arbre, rf = roc_curve_rf,
+           boosting = roc_curve_boosting)) +
+  geom_abline(slope = 1, intercept = 1, linetype = "dashed", col = "red") +
+  dark_theme_minimal()
+```
+
+
+## Comparaison des F1-score {.smaller}
+```{r}
+F1_Score <- function(tab){
+  precision <- tab$table[1]/(tab$table[1]+tab$table[2])
+  rappel <- tab$table[1]/(tab$table[1]+tab$table[3])
+
+   2*(precision*rappel)/(precision+rappel)
+}
+```
+
+<br>
+```{r f1_tab}
+tab_F1 <-  as.data.frame.matrix(matrix(nrow = 7, ncol = 2))
+tab_F1[,2] <- c(F1_Score(tab_lda),F1_Score(tab_qda),F1_Score(tab_logit),
+                F1_Score(tab_knn),F1_Score(tab_arbre),F1_Score(tab_rf),
+                F1_Score(tab_boosting)
+                )
+colnames(tab_F1) <- c("Modèle","F1-Score")
+tab_F1[1] <- c("LDA","QDA","LOGIT","KNN","ARBRE","RF", "BOOSTING")
+tab_F1[2] <- round(tab_F1[,2],3)
+
+tab_F1 |> 
+  kable()
+```
+
+

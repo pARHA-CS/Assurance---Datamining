@@ -1,0 +1,1060 @@
+---
+title: "Insurance"
+author: "Raphael MERCIER and Alexis SAVATON"
+format:
+  pdf:
+    include-in-header:
+      text: |
+        \addtokomafont{disposition}{\rmfamily}
+        \usepackage{amsmath}  % Ajout du package amsmath
+    toc: true
+    toc_depth: 6
+    toc_title: "Table des matières"
+    colorlinks: true
+    fontsize: 10pt
+header-includes:
+  - \usepackage{graphicx}
+  - \usepackage{fancyhdr}
+  - \pagestyle{fancy}
+  - \fancyhead[L]{\includegraphics[height=1cm]{logo_mecen.jpg}}
+always_allow_html: yes
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE, echo = FALSE, warning = FALSE,message = FALSE)
+```
+
+```{r echo=FALSE, include=FALSE, cache= FALSE}
+library(tidymodels)
+library(tidyverse)
+library(workflows)
+library(tune)
+library(doParallel)
+library(kableExtra)
+library(pROC)
+library(discrim)
+library(dplyr)
+library(caret)
+library(xgboost)
+library(knitr)
+library(modelsummary)
+library(vip)
+library(ggdark)
+library(showtext)
+library(ggplot2)
+library(dplyr)
+library(palmerpenguins, include.only = "penguins")
+library(xtable)
+```
+
+```{r echo=FALSE, include=FALSE}
+set.seed(69)
+```
+
+```{r}
+setwd("D:/Program Files (x86)/pdf_insurance")
+```
+
+```{r}
+df_insurance <- read.csv("train.csv", header = TRUE, sep =",",
+                     stringsAsFactors = TRUE)
+```
+
+
+```{r}
+df <- read.csv("resampled_data_new.csv", header = TRUE, sep =",",
+                     stringsAsFactors = TRUE)
+```
+
+
+```{r}
+df_1k <- read.csv("resampled_data_new_10k.csv", header = TRUE, sep =",",
+                     stringsAsFactors = TRUE)
+```
+
+
+```{r valeures aberrante}
+clean_outliers <- function(data, column_name) {
+  Q1 <- quantile(data[[column_name]], 0.25)
+  Q3 <- quantile(data[[column_name]], 0.75)
+  IQR <- Q3 - Q1
+  
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  
+  cleaned_data <- filter(data, data[[column_name]] <= upper_bound & data[[column_name]] >= lower_bound)
+  
+  return(cleaned_data)
+}
+```
+
+```{r}
+df1 <- clean_outliers(df,'Annual_Premium')
+df1_1k <- clean_outliers(df_1k,'Annual_Premium')
+```
+
+```{r}
+df1$Previously_Insured <- df1$Previously_Insured |> as.factor()
+df1$Driving_License <- df1$Driving_License |> as.factor()
+df1$Response <- df1$Response |> as.factor()
+df1$Region_Code <- df1$Region_Code |> as.factor()
+df1$Policy_Sales_Channel <- df1$Policy_Sales_Channel |> as.factor()
+
+df1_1k$Previously_Insured <- df1_1k$Previously_Insured |> as.factor()
+df1_1k$Driving_License <- df1_1k$Driving_License |> as.factor()
+df1_1k$Response <- df1_1k$Response |> as.factor()
+df1_1k$Region_Code <- df1_1k$Region_Code |> as.factor()
+df1_1k$Policy_Sales_Channel <- df1_1k$Policy_Sales_Channel |> as.factor()
+```
+
+```{r table metrics}
+create_metrics_table <- function(tab_lda) {
+  metrics_df <- data.frame(
+    Métrique = c("Mesure des performances", "Accuracy", "Erreur globale de classement", "Vrai négatif", "Vrai positif", "Précision"),
+    Valeur = c(
+      "",
+      round((tab_lda$table[1,1] + tab_lda$table[2,2]) / sum(tab_lda$table)*100, 2),
+      round((tab_lda$table[1,2] + tab_lda$table[2,1]) / sum(tab_lda$table)*100, 2),
+      round((tab_lda$table[1,1] / sum(tab_lda$table[1,])) * 100, 2),
+      round((tab_lda$table[2,2] / sum(tab_lda$table[2,])) * 100, 2),
+      round((tab_lda$table[1,1] / (tab_lda$table[1,1] + tab_lda$table[2,1])) * 100, 2)
+    )
+  )
+
+  colnames(metrics_df)[2] <- "Valeur en %"
+  
+  metrics_table <- metrics_df %>%
+    kable("html") %>%
+    kable_styling(bootstrap_options = "striped", full_width = FALSE)
+  
+  return(metrics_table)
+}
+
+```
+
+\newpage
+
+\vspace{2pt}
+
+# Problématique / Objectif
+
+Nos clients, une compagnie d'assurance santé, nous demande de l'aide pour savoir quels sont les clients qui pourraient être intéressés de souscrire une assurance pour leur voiture.
+Pour cela nous disposons d'une large base de donnée que nous utiliseront pour construire nos modèles.
+
+$\Rightarrow$ On veut finalement déterminer notre meilleur modèle de prédiction pour ne pas rater de clients potentiels.
+
+# Partie 1 : Notre Base de Données 
+
+## Type de variable
+
+La variable que l'on cherche à prédire est ***Response***, elle vaut 0 si le client n'est pas intéressé ou 1 s'il est intéressé.
+
+
+Pour cela on dispose de 10 autres variables :
+
+- ***Gender*** : *Factor*, le genre de l'individu 
+
+- ***Age*** : *Integer*, l'âge de l'individu
+
+- ***Driving_License*** : *Factor*, Variable codée 0 si l'individu n'a pas son permis, et 1 s'il l'a
+
+- ***Region_Code*** : *Factor*, code unique correspondant à la région de l'individu 
+
+- ***Previously_Insured*** : *Factor*, Variable codée 0 si l'individu n'a pas d'assurance pour son véhicule, et 1 s'il en a une
+
+- ***Vehicule_Age*** : *Factor*, l'age du véhicule 
+
+- ***Vehicule_Damage*** : *Factor*, Variable codée 0 si le véhicule de l'individu n'a jamais été endommagé, et 1 s'il l'a déjà été
+
+- ***Annual_Premium*** : *Integer*, la somme que l'individu doit payer comme prime d'assurance chaque année
+
+- ***Policy_Sales_Channel*** : *Integer*, code anonymisé pour le canal de communication avec l'individu (mail, téléphone etc..)
+
+- ***Vintage*** : *Integer*,  nombre de jours depuis lequel l'individu est client de l'assurance
+
+
+## Les ajustements
+
+Notre base de données contient `r nrow(df_insurance)` clients et est fortement déséquilibrée. Le taux d'individus avec *Response = 1* est de `r round(sum(df_insurance$Response == 1)/nrow(df_insurance)*100, 2)`% alors que pour *Response = 0* il est de `r round(sum(df_insurance$Response == 0)/nrow(df_insurance)*100, 2)`%.
+Ce problème d'équilibrage pose des problèmes dans l'estimation des modèles, ainsi que dans leur qualité pour prédire *Response = 1*.
+
+Nous avons donc dû faire un rééquilibrage de la base :
+
+- Nous avons créé un nouveau data frame, contenant dans un premier temps tous les individus prenant *Response = 1*.
+
+- Ensuite, on a tiré aléatoirement des individus prenant *Response = 0* pour compléter.
+
+- Ce qui nous donne finalement le data frame suivant contenant 100 000 individus :
+
+  - `r round(sum(df$Response == 1)/nrow(df)*100, 2)`% pour *Response = 1*
+  
+  - `r round(sum(df$Response == 0)/nrow(df)*100, 2)`% pour *Response = 0*
+  
+Notre nouvelle base de donnée se porte maintenant sur 100 000 individus, et la variable *Response* contient désormais 2 classes pratiquement équilibrées.
+Ces modifications nous permettront de construire par la suite des modèles de meilleure qualité, tout en gardant un temps de calcul raisonnable.
+      
+      
+On avait également des valeurs aberrantes dans la variable *Annual_premium*, que l'on a décidé de supprimer pour éviter de diminuer la performance de nos modèles prédictifs.\
+
+
+## Statistiques descriptives
+
+### Nos variables quantitatives {.smaller}
+
+Quelques statistiques de nos données sur nos variables numériques :  
+
+```{r stats}
+variables <- c("Age", "Annual_Premium", "Vintage")
+
+kable(summary(df1[, variables])) |> 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+Dans notre base de données, la moyenne d'âge de nos individus est de 40 ans, ils paient en moyenne 29 713$ d'assurance par an et sont en moyenne clients chez l'assureur depuis 154 jours.
+
+
+\newpage
+
+\vspace{10pt}
+
+# Partie 2 : Construction des modèles
+
+## La préparation 
+
+1. Découpage\
+
+Nous avons décidé de faire 2 splits, un pour les modèles peu gourmands en puissance de calcul, et un second avec moins d'individus pour les modèles plus gourmands. La proportion est la même dans les deux splits, 2/3 des individus pour train, et 1/3 pour test.\
+
+```{r split}
+split<-initial_split(df1,prop=2/3,strat="Response")
+df_train<-training(split)
+df_test<-testing(split)
+
+split_10k<-initial_split(df1_1k,prop=2/3,strat="Response")
+df_10k_train<-training(split_10k)
+df_10k_test<-testing(split_10k)
+```
+
+```{r fold}
+df_fold <- vfold_cv(df_train)
+```
+
+
+2. Les Recettes
+
+```{r}
+df_rec_1<- df_train %>%
+  recipe(Response ~ Gender + Age + Driving_License + Region_Code + Previously_Insured+ Vehicle_Age + Vehicle_Damage + Annual_Premium + Vintage)
+```
+
+```{r}
+df_rec_num <- recipe(Response~Age + Annual_Premium + Vintage, data = df_train) |> 
+  step_normalize(all_numeric())
+```
+
+```{r}
+df_rec <- recipe(Response~., data = df_train) |> 
+  step_normalize(all_numeric())
+```
+
+```{r}
+df_rec_boosting <- recipe(Response ~ ., data = df_10k_train)|>
+  step_dummy(all_nominal_predictors()) 
+```
+
+Nous avons plusieurs recettes adaptées à certains modèles :\
+- **df_rec_1** : recette sans la variable Policy_Sales_Channel, pour éviter un soucis de colinéarité parfaite
+- **df_rec_num** : recette avec seulement les variables numériques  
+- **df_rec** : recette avec toutes les variables  
+- **df_rec_boosting** : recette pour le boosting avec moins d'individus  
+
+
+## Nos modèles
+
+### LDA
+
+Pour notre tout premier modèle nous avons une LDA (Linear Discriminant Analysis), qui utilise la recette : **df_rec_1**.
+
+- La matrice de confusion :
+```{r model lda}
+lda_mod<- discrim_linear() |> 
+  set_mode("classification") |> 
+  set_engine("MASS") |> 
+  set_args(cost = tune())
+```
+
+```{r workflow lda}
+lda_wf<- workflow() %>%
+  add_recipe(df_rec_1) %>%
+  add_model(lda_mod)
+```
+
+```{r optimisation lda}
+n_cores <- parallel::detectCores(logical = TRUE)
+registerDoParallel(cores = n_cores - 2)
+
+lda_grid <- grid_regular(cost(),levels =10)
+
+
+lda_tune_results <- lda_wf |> 
+  tune_grid(resamples = df_fold,
+            grid = lda_grid,
+            metrics = metric_set(accuracy, roc_auc)
+            )
+
+stopImplicitCluster()
+```
+
+```{r paramtre optimal lda}
+param_final_lda <- lda_tune_results %>%
+  select_best(metric = "accuracy")
+
+lda_wf <- lda_wf %>%
+  finalize_workflow(param_final_lda)
+
+lda_fit <- lda_wf %>%
+  last_fit(split)
+
+test_performance_lda <- lda_fit %>% collect_metrics()
+
+test_predictions_lda <- lda_fit %>% collect_predictions()
+```
+
+
+```{r mat_conf_lda, results='asis'}
+tab_lda <- test_predictions_lda %>%
+  conf_mat(estimate = .pred_class, truth = Response)
+
+tab0_lda <- tab_lda$table %>% as.array() %>% t() %>% addmargins()
+
+tab1_lda <- tab0_lda %>% matrix(nrow = nrow(tab0_lda)) %>%
+  as_tibble() %>%
+  add_column(Réalité = c("N", "Y", "Total"), .before = 1) %>%
+  rename(N = V1, Y = V2, Total = V3)
+
+kable(tab1_lda) %>% add_header_above(c(" ", "Prédiction" = 2, " ")) %>%
+  column_spec(c(4), bold = T, width = "2cm") %>%
+  column_spec(1, bold = T) %>%
+  row_spec(c(3), bold = T) %>%
+  row_spec(c(0), bold = T) %>%
+  kable_styling(position = "center",
+                full_width = FALSE,
+                bootstrap_options = "bordered",
+                latex_options = "hold_position"
+  )
+```
+
+
+- Les mesures de performance du modèle :
+```{r metrics_lda, results='asis'}
+metrics_table_lda <- create_metrics_table(tab_lda)
+metrics_table_lda
+```
+
+\newpage 
+
+\vspace{10pt}
+
+Petit point sur les mesures de performance : 
+
+- ***Accuracy*** : C'est le pourcentage total des prédictions correctes par rapport au nombre total d'échantillons. En d'autres termes, c'est le nombre d'échantillons correctement classés divisé par le nombre total d'échantillons.
+
+\begin{equation}
+Accuracy = \frac{Nombre\ d'echantillons\ correctement\ classes}{Nombre\ total\ d'echantillons}
+\end{equation}
+
+- ***Erreur globale de classement*** : C'est le pourcentage total des prédictions incorrectes par rapport au nombre total d'échantillons. C'est essentiellement le complément de l'accuracy.
+
+\begin{equation}
+Erreur\ globale\ de\ classement = \frac{Nombre\ d'echantillons\ incorrectement\ classes}{Nombre\ total\ d'echantillons}
+\end{equation}
+
+- ***Vrai négatif*** : C'est le nombre d'échantillons de la classe négative (classe 0) qui ont été correctement prédits comme négatifs.
+
+\begin{equation}
+Vrai\ negatif\ (TN) = \frac{Nombre\ d'echantillons\ classes\ correctement\ comme\ negatifs}{Nombre\ total\ d'echantillons\ reels\ negatifs}
+\end{equation}
+
+- ***Vrai positif*** : C'est le nombre d'échantillons de la classe positive (classe 1) qui ont été correctement prédits comme positifs.
+
+\begin{equation}
+Vrai\ positif\ (TP) = \frac{Nombre\ d'echantillons\ classes\ correctement\ comme\ positifs}{Nombre\ total\ d'echantillons\ reels\ positifs}
+\end{equation}
+
+- ***Précision*** : C'est le pourcentage d'échantillons de la classe positive (classe 1) qui ont été correctement prédits comme positifs parmi tous les échantillons prédits comme positifs. C'est une mesure de la qualité des prédictions positives du modèle.
+
+\begin{equation}
+Précision = \frac{Nombre\ de\ vrais\ positifs}{Nombre\ de\ vrais\ positifs + Nombre\ de\ faux\ positifs}
+\end{equation}  
+
+\vspace{10pt}
+
+Revenons à notre modèle LDA. Bien qu'il soit moyen avec une accuracy de 77,45 %, son point positif est qu'il permet de minimiser considérablement le nombre d'individus qui sont en réalité intéressés et que le modèle avait prédit comme ne l'étant pas. Ce qui peut en effet être important pour une compagnie d'assurance, prédire qu'un individu est intéressé alors qu'il ne l'est pas aura probablement moins d'incidence que de rater un client qui était  intéressé. 
+
+\newpage
+
+- La Courbe ROC :
+
+```{r roc lda}
+roc_curve_lda <-roc(test_predictions_lda$Response, test_predictions_lda$.pred_1)
+ggroc(roc_curve_lda, col = "black") + geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "red")
+
+roc(test_predictions_lda$Response, test_predictions_lda$.pred_1) |> auc()
+```
+
+On a une  aire sous la courbe de 0.84196, le modèle a une capacité de discrimination correcte pour une LDA.
+
+\newpage 
+
+### QDA
+
+Notre modèle QDA (Quadratic Discriminant Analysis) utilise la recette : **df_rec_1**, tout comme la LDA.
+
+- La matrice de confusion :  
+
+```{r modele qda}
+qda_mod<- discrim_quad() |> 
+  set_mode("classification") |> 
+  set_engine("MASS")
+```
+
+```{r workflow qda}
+qda_wf<- workflow() |> 
+  add_recipe(df_rec_1) |> 
+  add_model(qda_mod)
+```
+
+```{r}
+qda_fit <-last_fit(qda_wf,split=split)
+
+tab_result_qda<-qda_fit %>% collect_predictions()  
+
+```
+
+```{r mat conf qda}
+tab_qda<-tab_result_qda %>%
+  conf_mat(estimate = .pred_class,truth=Response)
+tab0_qda <- tab_qda$table %>% as.array() %>% t() %>% addmargins()
+tab1_qda<- tab0_qda  %>% matrix(nrow=nrow(tab0_qda)) %>%
+  as_tibble() %>%
+  add_column(Réalité=c("N","Y","Total"),.before=1) %>%
+  rename(N = V1, Y = V2,Total=V3)
+tab1_qda %>% 
+  kable() %>%  
+  add_header_above(c(" ","Prédiction" = 2," ")) %>%
+  column_spec(c(4), bold = TRUE, width="2cm")   %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(c(3), bold = TRUE)   %>%
+  row_spec(c(0), bold = TRUE) %>%
+  kable_styling(position = "center",
+      full_width = FALSE,
+      bootstrap_options = "bordered",
+      latex_options = "hold_position"
+    )
+```
+
+
+- Mesure des performances du modèle :
+
+
+```{r metric qda}
+metrics_table_qda <- create_metrics_table(tab_qda)
+metrics_table_qda
+```
+
+Le modèle QDA est assez similaire au modèle LDA, avec une accuracy de 75.54%, mais il rate un nombre plus élevé de clients potentiels, ce qui en fait un modèle moins intéressant que la LDA.
+
+\newpage
+- La courbe ROC :
+
+
+```{r roc qda}
+roc_curve_qda <- roc(tab_result_qda$Response,tab_result_qda$.pred_1) 
+ggroc(roc_curve_qda, col = "black") + geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "red")
+
+roc(tab_result_qda$Response,tab_result_qda$.pred_1) |>  auc()
+```
+
+Une aire sous la courbe un peu inférieure à celle de la LDA.
+
+
+\newpage
+### KNN 
+
+Nous avons maintenant notre modèle des KNN (k-Nearest Neighbours), ce modèle utilise la recette : **df_rec_num**.
+
+- Optimisation des paramètres :
+
+Tout d'abord pour le modèle KNN nous devons optimiser le nombre de voisin k :
+
+```{r modele knn}
+knn_mod <- nearest_neighbor() |> 
+  set_mode("classification") |> 
+  set_engine("kknn") |> 
+  set_args(neighbors=tune())
+```
+
+```{r workflow knn}
+knn_wf <- workflow() |> add_model(knn_mod) |> 
+  add_recipe(df_rec_num) 
+```
+
+```{r optimisation knn}
+n_cores <- parallel::detectCores(logical = TRUE)
+registerDoParallel(cores = n_cores - 2)
+
+knn_grid <- grid_regular(neighbors(range = c(1, 600)), levels = 10)
+
+
+knn_tune_res <- tune_grid(
+  knn_wf,
+  resamples = df_fold,
+  grid = knn_grid
+)
+
+
+stopImplicitCluster()
+
+autoplot(knn_tune_res)
+```
+
+```{r param knn}
+param_final_knn <- knn_tune_res %>%
+  select_best(metric = "accuracy")
+
+knn_wf <- knn_wf %>%
+  finalize_workflow(param_final_knn)
+
+knn_fit <- knn_wf %>%
+  last_fit(split)
+
+test_performance_knn <- knn_fit %>% collect_metrics()
+
+test_predictions_knn <- knn_fit %>% collect_predictions()
+
+k_knn <- param_final_knn$neighbors
+```
+Le nombre de voisin optimal est de : **`r format(k_knn, scientific = FALSE)`**.
+
+- La matrice de confusion :  
+
+```{r mat conf knn}
+tab_knn<-test_predictions_knn %>%
+  conf_mat(estimate = .pred_class,truth=Response)
+
+tab0_knn <- tab_knn$table %>% as.array() %>% t() %>% addmargins()
+
+tab1_knn<- tab0_knn  %>% matrix(nrow=nrow(tab0_knn)) %>%
+  as_tibble() %>%
+  add_column(Réalité=c("N","Y","Total"),.before=1) %>%
+  rename(N = V1, Y = V2,Total=V3)
+
+tab1_knn %>% kable() %>%  add_header_above(c(" ","Prédiction" = 2," ")) %>%
+  column_spec(c(4), bold = T ,width="2cm")   %>%
+  column_spec(1,bold=T) %>%
+  row_spec(c(3), bold = T)   %>%
+  row_spec(c(0), bold = T) %>%
+  kable_styling(position = "center",
+      full_width = FALSE,
+      bootstrap_options = "bordered",
+      latex_options = "hold_position"
+    )
+```
+
+- Mesure des performances du modèle :
+
+```{r metric knn}
+metrics_table_knn <- create_metrics_table(tab_knn)
+metrics_table_knn
+```
+
+Pour ce modèle, l'accuracy est très faible, il sera très peu fiable pour prédire si nos individus sont intéréssés ou non.
+
+- La courbe ROC :
+
+```{r roc knn}
+roc_curve_knn <- roc(test_predictions_knn$Response, test_predictions_knn$.pred_1)
+ggroc(roc_curve_knn, col = "black") + geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "red")
+
+roc(test_predictions_knn$Response, test_predictions_knn$.pred_1) |> auc()
+```
+
+La courbe ROC a une aire également très faible. Le nombre optimal de voisins est élevé, ce qui demande des ressources conséquentes pour calculer ce modèle qui est au final très mauvais, on ne le gardera pas. 
+
+\newpage
+### LOGISTIC REGRESSION 
+
+
+Pour essayer de prédire une variable binaire nous pouvons aussi utiliser le modèle Logit, plus couramment utilisé en économétrie.\
+Ce modèle utilise la recette : **df_rec_1**.
+
+- La matrice de confusion :
+
+```{r logit_mod_wf}
+logit_mod <- logistic_reg() |>  
+  set_mode("classification") |> 
+  set_engine("glm")
+
+logit_wf <- workflow() |> 
+  add_model(logit_mod) |> 
+  add_recipe(df_rec_1)
+
+logit_wf_final <-last_fit(logit_wf,split=split)
+
+tab_result_logit<-logit_wf_final %>% collect_predictions()  
+```
+
+```{r mat conf logit}
+tab_logit<-tab_result_logit %>%
+  conf_mat(estimate = .pred_class,truth=Response)
+tab0_logit <- tab_logit$table %>% as.array() %>% t() %>% addmargins()
+tab1_logit<- tab0_logit  %>% matrix(nrow=nrow(tab0_logit)) %>%
+  as_tibble() %>%
+  add_column(Réalité=c("N","Y","Total"),.before=1) %>%
+  rename(N = V1, Y = V2,Total=V3)
+tab1_logit %>% kable() %>%  add_header_above(c(" ","Prédiction" = 2," ")) %>%
+  column_spec(c(4), bold = T ,width="2cm")   %>%
+  column_spec(1,bold=T) %>%
+  row_spec(c(3), bold = T )   %>%
+  row_spec(c(0), bold = T) %>%
+  kable_styling(position = "center",
+      full_width = FALSE,
+      bootstrap_options = "bordered",
+      latex_options = "hold_position"
+    )
+```
+
+- Mesure de performance du modèle : 
+
+```{r metric logit}
+metrics_table_logit <- create_metrics_table(tab_logit)
+metrics_table_logit
+```
+
+Nous obtenons des résultats assez similaires à la LDA, avec une accuracy un peu plus élevée pour ce modèle et un peu plus de vrai positif pour la LDA.
+Ce modèle, tout comme la LDA est donc assez moyen.
+
+
+\newpage
+- La courbe ROC :
+
+```{r roc logit}
+roc_curve_logit <- roc(tab_result_logit$Response,tab_result_logit$.pred_1) 
+ggroc(roc_curve_logit, col = "black") + geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "red")
+
+
+roc(tab_result_logit$Response,tab_result_logit$.pred_1) |>  auc()
+```
+
+Une courbe ROC aussi assez similaire à celle de LDA, son aire est de 0.842. Le modèle a une capacité de discrimination correcte.
+
+
+\newpage
+### DECISION TREE
+
+Nous avons maintenant le modèle d'arbre de décision, qui utilise la recette : **df_rec**.
+
+- Optimisation des paramètres :
+
+Tout d'abord, pour ce modèle, nous devons optimiser le paramètre de cout de complexité (cost complexity), qui régularise la croissance de l'arbre en pénalisant les structures plus complexes, favorisant ainsi des modèles plus simples et généralisables. Par ailleurs, nous devons également optimiser la profondeur de l'arbre.
+
+Nous choisiront le couple de cost complexity et de tree depth qui maximisent l'accuracy du modèle.
+
+```{r mod arbre}
+arbre_mod <- decision_tree() |> 
+  set_engine("rpart") |> 
+  set_mode("classification") |> 
+  set_args(cost_complexity = tune(),
+           tree_depth = tune())
+```
+
+```{r workflow abre}
+arbre_wf <- workflow() |> add_model(arbre_mod) |> 
+  add_recipe(df_rec) 
+```
+
+```{r optimisation abre}
+n_cores <- parallel::detectCores(logical = TRUE)
+registerDoParallel(cores = n_cores - 2)
+
+arbre_grid <- grid_regular(cost_complexity(range = c(-15,-0.1)), tree_depth(), 
+                                     levels = 10)
+
+
+arbre_tune_res <- tune_grid(
+  arbre_wf,
+  resamples = df_fold,
+  grid = arbre_grid,
+  metrics = metric_set(accuracy)
+)
+
+
+stopImplicitCluster()
+
+autoplot(arbre_tune_res)
+```
+
+```{r param final arbre}
+param_final_arbre <- arbre_tune_res %>%
+  select_best(metric = "accuracy")
+
+arbre_wf <- arbre_wf %>%
+  finalize_workflow(param_final_arbre)
+
+arbre_fit <- arbre_wf %>%
+  last_fit(split)
+
+test_performance_arbre <- arbre_fit %>% collect_metrics()
+
+test_predictions_arbre <- arbre_fit %>% collect_predictions()
+
+cp_tree <- param_final_arbre$cost_complexity
+```
+
+On obtient un paramètre $γ$ optimal de : **`r format(cp_tree, scientific = FALSE)`** et une profondeur de **`r param_final_arbre$tree_depth`**.
+
+\newpage
+- Visualistaion de l'arbre obtenu :
+
+```{r tree_fit}
+arbre_fit |>  
+  extract_fit_engine() |>  
+  rpart.plot::prp(type = 0, extra = 1, split.box.col = "red",
+                  roundint = FALSE)
+```
+
+- Les variables importantes :
+```{r}
+arbre_final_model <- last_fit(arbre_wf, split)
+```
+
+```{r}
+extract_fit_parsnip(arbre_final_model)$fit |>
+  vip(num_features = 20) +
+  ggtitle("Importance des variables")
+```
+
+Les variables les plus importantes pour réailser les split dans l'abre sont donc : ***Vehicle_Damage*** et ***Previously_Insured***.
+
+- La matrice de confusion : 
+
+```{r mat conf abre}
+tab_arbre<-test_predictions_arbre %>%
+  conf_mat(estimate = .pred_class,truth=Response)
+
+tab0_arbre <- tab_arbre$table %>% as.array() %>% t() %>% addmargins()
+
+tab1_arbre<- tab0_arbre  %>% matrix(nrow=nrow(tab0_arbre)) %>%
+  as_tibble() %>%
+  add_column(Réalité=c("N","Y","Total"),.before=1) %>%
+  rename(N = V1, Y = V2,Total=V3)
+
+tab1_arbre %>% kable() %>%  add_header_above(c(" ","Prédiction" = 2," ")) %>%
+  column_spec(c(4), bold = T ,width="2cm")   %>%
+  column_spec(1,bold=T) %>%
+  row_spec(c(3), bold = T )   %>%
+  row_spec(c(0), bold = T) %>%
+  kable_styling(position="center",full_width = FALSE,
+                bootstrap_options = "bordered",
+                latex_options = "hold_position")
+```
+
+- Les mesures de performance du modèle :
+
+```{r metric arbre}
+metrics_table_arbre <- create_metrics_table(tab_arbre)
+metrics_table_arbre
+```
+
+Les performances de ce modèle sont comparables à celles de la LDA et de la régression logistique, avec une accuracy légèrement supérieure, mais un taux de vrai positif toujours inférieur à celui de la LDA. Dans l'ensemble, ce modèle est donc plutôt moyen aussi.
+
+
+- La Courbe ROC :
+
+```{r roc arbre}
+roc_curve_arbre <- roc(test_predictions_arbre$Response, test_predictions_arbre$.pred_1) 
+ggroc(roc_curve_arbre, col = "black") + geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "red")
+
+roc(test_predictions_arbre$Response, test_predictions_arbre$.pred_1) |> auc()
+```
+
+L'aire de la courbe ROC est de 0.8413, le modèle a une capacité de discrimination correcte.
+
+\newpage
+### RANDOM FOREST
+
+Notre modèle de random forest, qui se base sur des arbres de décisions, utilise la recette : **df_rec**.
+
+- Optimisation des paramètres : 
+
+Pour ce modèle nous avons décider d'optimiser 2 paramètres : le nombre d'arbres (ntrees) et le nombre de variables sélectionnées au hasard à chaque division d'arbre (mtry).
+```{r model rf}
+rf_mod <- rand_forest() |> 
+  set_args(mtry = tune(), trees = tune()) |> 
+  set_engine("ranger", importance = "impurity") |> 
+  set_mode("classification")
+```
+
+```{r workflow rf}
+rf_wf <- workflow() |> 
+  add_recipe(df_rec) |> 
+  add_model(rf_mod)
+```
+
+```{r optimisation rf}
+n_cores <- parallel::detectCores(logical = TRUE)
+registerDoParallel(cores = n_cores - 1)
+
+rf_params <- extract_parameter_set_dials(rf_wf) |>  
+  update(mtry = mtry(c(1,10)), trees = trees(c(50,500)))
+
+rf_grid <- grid_regular(rf_params, levels = c(mtry = 10, trees = 5))
+
+
+rf_tune_results <- rf_wf |> 
+  tune_grid(resamples = df_fold,
+            grid = rf_grid,
+            metrics = metric_set(accuracy)
+            )
+
+stopImplicitCluster()
+
+autoplot(rf_tune_results)
+```
+
+
+```{r param rf}
+param_final_rf <- rf_tune_results %>%
+  select_best(metric = "accuracy")
+
+rf_wf <- rf_wf %>%
+  finalize_workflow(param_final_rf)
+
+rf_fit <- rf_wf %>%
+  last_fit(split)
+
+test_performance_rf <- rf_fit |>  collect_metrics()
+
+test_predictions_rf <- rf_fit |>  collect_predictions()
+```
+
+Les meilleurs hyperparamètres sont : **ntrees = 500 ** & **mtry = 3**.
+
+- La matrice de confusion :
+
+```{r mat conf rf}
+tab_rf<-test_predictions_rf %>%
+  conf_mat(estimate = .pred_class,truth=Response)
+
+tab0_rf <- tab_rf$table %>% as.array() %>% t() %>% addmargins()
+
+tab1_rf<- tab0_rf  %>% matrix(nrow=nrow(tab0_rf)) %>%
+  as_tibble() %>%
+  add_column(Réalité=c("N","Y","Total"),.before=1) %>%
+  rename(N = V1, Y = V2,Total=V3)
+
+tab1_rf %>% kable() %>%  add_header_above(c(" ","Prédiction" = 2," ")) %>%
+  column_spec(c(4), bold = T ,width="2cm")   %>%
+  column_spec(1,bold=T) %>%
+  row_spec(c(3), bold = T )   %>%
+  row_spec(c(0), bold = T) %>%
+  kable_styling(position="center",full_width = FALSE,
+                bootstrap_options = "bordered",
+                latex_options = "hold_position")
+```
+
+\newpage
+- Les mesures de performance du modèle :
+
+```{r metric rf}
+metrics_table_rf <- create_metrics_table(tab_rf)
+metrics_table_rf
+```
+
+Notre Random Forest est le modèle avec la meilleure accuracy : 79.26%, et est globalement légèrement meilleur que l'arbre de décision.
+
+
+- La Courbe ROC :
+
+```{r roc rf}
+roc_curve_rf <- roc(test_predictions_rf$Response, test_predictions_rf$.pred_1)
+ggroc(roc_curve_rf, col = "black") + geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "red")
+
+roc(test_predictions_rf$Response, test_predictions_rf$.pred_1) |> auc()
+```
+
+L'aire de la courbe ROC est de 0.8577, le modèle a une capacité de discrimination assez bonne.
+
+\newpage
+### BOOSTING 
+
+Notre dernier modèle, le BOOSTING, qui se base lui aussi sur des arbres de décisions, utilise la recette : **df_rec_boosting**.
+
+- Optimisation des paramètres :
+
+Pour le Boosting, nous avons décidé d'optimiser 3 paramètres : le nombre d'arbre (trees), la profondeur des arbres (tree depth) et le taux d'apprentissage (learning rate - $\lambda $).
+
+```{r boost_mod_wf}
+boosting_mod <- boost_tree() |>  
+  set_engine("xgboost") |>  
+  set_mode("classification") |> 
+  set_args(trees = tune(), tree_depth = tune(), learn_rate = tune())
+
+boosting_wf <- workflow() |>  
+  add_model(boosting_mod) |> 
+  add_recipe(df_rec_boosting)
+```
+
+```{r optimisation boosting}
+n_cores <- parallel::detectCores(logical = TRUE)
+registerDoParallel(cores = n_cores - 1)
+
+boosting_params <- boosting_wf |> 
+  extract_parameter_set_dials() |> 
+  update(trees= trees(c(1,500)), 
+         tree_depth = tree_depth(c(1,10)), 
+         learn_rate = learn_rate((c(-2, -0.1)))
+         )
+
+boosting_grid <- grid_regular(boosting_params, levels = 3)
+
+
+boosting_tune_res <- tune_grid(boosting_wf,
+    resamples = df_fold, 
+    grid = boosting_grid,
+    metrics = metric_set(accuracy)
+  )
+
+
+
+stopImplicitCluster()
+
+autoplot(boosting_tune_res)
+```
+
+```{r param boosting}
+param_final_boosting <- boosting_tune_res %>%
+  select_best(metric = "accuracy")
+
+boosting_wf <- boosting_wf %>%
+  finalize_workflow(param_final_boosting)
+
+boosting_fit <- boosting_wf %>%
+  last_fit(split)
+
+test_performance_boosting <- boosting_fit %>% collect_metrics()
+
+test_predictions_boosting <- boosting_fit %>% collect_predictions()
+
+```
+
+Les meilleurs hyperparamètres sont : **ntrees = `r param_final_boosting$trees` **, **depth = `r param_final_boosting$tree_depth`** & $\lambda =$ **`r param_final_boosting$learn_rate`**.
+
+- La matrice de confusion :
+
+```{r mat conf boosting}
+tab_boosting <- test_predictions_boosting |>
+  conf_mat(estimate = .pred_class, truth = Response)
+
+tab0_boosting <- tab_boosting$table %>% as.array() %>% t() %>% addmargins()
+
+tab1_boosting<- tab0_boosting  %>% matrix(nrow=nrow(tab0_boosting)) %>%
+  as_tibble() %>%
+  add_column(Réalité=c("N","Y","Total"),.before=1) %>%
+  rename(N = V1, Y = V2,Total=V3)
+
+tab1_boosting %>% kable() %>%  add_header_above(c(" ","Prédiction" = 2," ")) %>%
+  column_spec(c(4), bold = T,width="2cm")   %>%
+  column_spec(1,bold=T) %>%
+  row_spec(c(3), bold = T )   %>%
+  row_spec(c(0), bold = T) %>%
+  kable_styling(position="center",full_width = FALSE,
+                bootstrap_options = "bordered",
+                latex_options = "hold_position")
+```
+
+- Les mesures de performance du modèle :
+
+```{r metric boosting}
+metrics_table_boosting <- create_metrics_table(tab_boosting)
+metrics_table_boosting
+```
+
+Le Boosting est un de nos meilleurs modèles, avec une accuracy légèrement inférieure à celle de la Random Forest.
+
+- La Courbe ROC :
+
+```{r roc_boost}
+roc_curve_boosting <- roc(test_predictions_boosting$Response, test_predictions_boosting$.pred_1) 
+ggroc(roc_curve_boosting, col = "black") + geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "red")
+
+roc(test_predictions_boosting$Response, test_predictions_boosting$.pred_1) |> auc()
+```
+
+L'aire de la courbe roc est de 0.8576, le modèle a une capacité de discrimination assez bonne, quasiment identique à la random forest.
+
+\newpage
+
+# Partie 3 : C'est lequel le best ?
+
+## Comparaison Courbe ROC 
+
+```{r all_roc}
+ggroc(list(knn = roc_curve_knn, lda = roc_curve_lda,
+           qda = roc_curve_qda, logit = roc_curve_logit,
+           tree = roc_curve_arbre, rf = roc_curve_rf,
+           boosting = roc_curve_boosting)) +
+  geom_abline(slope = 1, intercept = 1, linetype = "dashed", col = "red")
+```
+
+Les courbes ROC de tous nos modèles restent assez proches les unes des autres, mais deux sont au-dessus, celle du Boosting et de la Random Forest. A l'opposé, celle des knn est nettement moins bonne.
+
+## Comparaison des F1-score 
+
+Le F1-score est une mesure de précision d'un modèle de classification, qui tient compte à la fois de la précision (capacité du modèle à identifier correctement les exemples positifs) et du rappel (capacité du modèle à identifier tous les exemples positifs).
+
+$F1 = 2 \times \frac{\text{précision} \times \text{rappel}}{\text{précision} + \text{rappel}}$
+
+
+```{r}
+F1_Score <- function(tab){
+  precision <- tab$table[1]/(tab$table[1]+tab$table[2])
+  rappel <- tab$table[1]/(tab$table[1]+tab$table[3])
+
+   2*(precision*rappel)/(precision+rappel)
+}
+```
+
+```{r f1_tab}
+tab_F1 <-  as.data.frame.matrix(matrix(nrow = 7, ncol = 2))
+tab_F1[,2] <- c(F1_Score(tab_lda),F1_Score(tab_qda),F1_Score(tab_logit),
+                F1_Score(tab_knn),F1_Score(tab_arbre),F1_Score(tab_rf),
+                F1_Score(tab_boosting)
+                )
+colnames(tab_F1) <- c("Modèle","F1-Score")
+tab_F1[1] <- c("LDA","QDA","LOGIT","KNN","ARBRE","RF", "BOOSTING")
+tab_F1[2] <- round(tab_F1[,2],3)
+
+tab_F1 |> 
+  kable()
+```
+
+Les meilleurs F1-Score sont ceux de : l'Arbre de Décision, de la Random Forest et du Boosting.
+
+## Conclusion :
+
+Après avoir construit tous nos modèles, on remarque qu'il y en aucun qui soit particulièrement bon. L'accuracy maximale atteinte par un de nos modèles est de 79.26% pour la random forest, ce qui reste globalement moyen pour un modèle de prédiction.
+
+Pour choisir notre meilleur modèle, nous allons nous baser sur le temps de calcul, les courbes ROC et le F1-Score. Nos meilleurs modèles sont l'**Arbre de Décision**, la **Random Forest** et le **Boosting**.\
+Le Boosting est un modèle avec une bonne aire sous la courbe ROC, un bon F1-Score, mais il est extrêmement gourmand en ressources de calcul, il prend autant de temps que la random forest, alors qu'il est construit à partir d'une base de données contenant 10 fois moins d'individus.\
+La Random Forest a aussi un bon F1-Score, une bonne aire sous la courbe ROC, mais le temps de calcul est long.\
+Ce qui nous mène à l'Arbre de Décision, qui a certes de moins bons résultats que les deux modèles précédents, mais un temps de calcul très rapide, ce qui compense la petite différence de performances.\
+
+
+L'Arbre de Décision est notre meilleur modèle !
+
+## Source 
+
+- Kobia.fr
+- Logo MECEN 
