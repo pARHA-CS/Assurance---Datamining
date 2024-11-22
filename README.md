@@ -15,9 +15,6 @@ Ce projet universitaire consiste à appliquer des techniques de datamining pour 
 - **Langage principal** : R
 - Outils et bibliothèques spécifiques (`tidymodels`, `pROC`, `caret`, `xgboost`, `xgboost`,).
 
-Voici la mise à jour de la section **Contenu du projet** intégrant la partie sur le rééquilibrage des données :
-
----
 
 ## Contenu du projet
 
@@ -49,9 +46,6 @@ Le projet comprend les éléments suivants :
 5. **Recommandations** :  
    Sélection du modèle le plus performant et analyse de ses résultats.  
 
----
-
-Cette version explique clairement où et comment le rééquilibrage des données s'inscrit dans le projet. 😊
 
 ## Prérequis
 
@@ -61,7 +55,6 @@ Cette version explique clairement où et comment le rééquilibrage des données
 - **Packages R nécessaires** (installer avec `install.packages()`) :
  Voici la version mise à jour de la section **Prérequis** avec l'inclusion des librairies nécessaires directement dans le texte :
 
----
 
 ## Prérequis
 
