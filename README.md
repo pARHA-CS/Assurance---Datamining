@@ -36,7 +36,7 @@ Le projet comprend les éléments suivants :
    - Régression logistique  
    - Arbres de décision  
    - Random Forest  
-   - (Autres modèles si applicable)  
+   - Autres modèles ... 
 
 4. **Évaluation des modèles** :  
    - Métriques utilisées : précision, rappel, F1-score, AUC-ROC.  
