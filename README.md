@@ -102,7 +102,7 @@ Ces packages sont utilisés pour diverses étapes du projet, telles que :
    ```bash
    git clone https://github.com/pARHA-CS/Assurance-Datamining.git
    ```
-2. Ouvrir le projet dans RStudio.
+2. Ouvrir le projet `pdf_insurance.qmd` dans RStudio.
 3. Installer les packages requis :
   ```R
 install.packages(c("tidymodels", "tidyverse", "workflows", "tune", "doParallel", 
