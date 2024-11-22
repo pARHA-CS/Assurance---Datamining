@@ -36,7 +36,6 @@ Le projet comprend les éléments suivants :
    - Régression logistique  
    - Arbres de décision  
    - Random Forest  
-   - SVM (Support Vector Machines)  
    - (Autres modèles si applicable)  
 
 4. **Évaluation des modèles** :  
@@ -55,12 +54,6 @@ Le projet comprend les éléments suivants :
 - **Packages R nécessaires** (installer avec `install.packages()`) :
  Voici la version mise à jour de la section **Prérequis** avec l'inclusion des librairies nécessaires directement dans le texte :
 
-
-## Prérequis
-
-- **Logiciels** :
-  - R version 4.x ou supérieure
-  - RStudio (optionnel, mais recommandé)
 
 - **Packages R nécessaires** (installer avec `install.packages()` ou `remotes::install_github()` pour certains) :
 
