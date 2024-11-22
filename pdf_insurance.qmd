@@ -74,7 +74,7 @@ df_1k <- read.csv("resampled_data_new_10k.csv", header = TRUE, sep =",",
 ```
 
 
-```{r valeures aberrante}
+```{r valeures aberrantes}
 clean_outliers <- function(data, column_name) {
   Q1 <- quantile(data[[column_name]], 0.25)
   Q3 <- quantile(data[[column_name]], 0.75)
